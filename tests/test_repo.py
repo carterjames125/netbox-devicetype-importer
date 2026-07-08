@@ -289,10 +289,18 @@ class TestParseFile:
         assert repo._parse_file(str(tmp_path / "missing.yaml"), slugs=[]) is None
 
     def test_missing_required_field_returns_none(self, repo, tmp_path):
-        """A YAML file missing a required field (e.g. 'slug') returns None."""
+        """A YAML file missing 'manufacturer' or 'model' returns None."""
+        f = tmp_path / "device.yaml"
+        _write_yaml(f, {"manufacturer": "Cisco"})
+        assert repo._parse_file(str(f), slugs=[]) is None
+
+    def test_missing_slug_is_auto_generated(self, repo, tmp_path):
+        """A YAML file with no slug gets one derived from the model name."""
         f = tmp_path / "device.yaml"
         _write_yaml(f, {"manufacturer": "Cisco", "model": "ASR-1001"})
-        assert repo._parse_file(str(f), slugs=[]) is None
+        result = repo._parse_file(str(f), slugs=[])
+        assert result is not None
+        assert result["slug"] == "asr-1001"
 
     def test_slug_filter_match(self, repo, tmp_path):
         """A file whose slug is in the filter list is returned."""
