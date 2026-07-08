@@ -3,7 +3,7 @@
 Environment variables:
 - LOG_LEVEL (default: INFO)
 - LOG_JSON (default: false)
-- LOG_FILE (optional path for file sink)
+- LOG_FILE (default: logs/netbox_importer.log)
 - LOG_ROTATION (default: 10 MB)
 - LOG_RETENTION (default: 7 days)
 """
@@ -16,6 +16,8 @@ from pathlib import Path
 
 from loguru import logger
 
+
+DEFAULT_LOG_FILE = "logs/netbox_importer.log"
 
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 
@@ -88,4 +90,4 @@ def get_logger(name: str):
 	return logger.bind(module=name)
 
 
-__all__ = ["get_logger", "logger", "setup_logging"]
+__all__ = ["DEFAULT_LOG_FILE", "get_logger", "logger", "setup_logging"]

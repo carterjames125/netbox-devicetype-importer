@@ -5,12 +5,21 @@ and parses them in parallel using threads or multiple processes.
 """
 import json
 import os
+import re
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import git
 import yaml
 from loguru import logger
+
+
+def _slugify(name: str) -> str:
+    """Convert a name to a NetBox-compatible slug (letters, numbers, underscores, hyphens)."""
+    slug = name.casefold()
+    slug = re.sub(r"[^a-z0-9_-]+", "-", slug)
+    slug = re.sub(r"-{2,}", "-", slug)
+    return slug.strip("-")
 
 
 def _parse_data_file_worker(payload: tuple[str, tuple[str, ...]]) -> dict | None:
@@ -43,7 +52,7 @@ def _parse_data_file_worker(payload: tuple[str, tuple[str, ...]]) -> dict | None
         name = data["manufacturer"]
         data["manufacturer"] = {
             "name": name,
-            "slug": name.casefold().replace(" ", "-"),
+            "slug": _slugify(name),
         }
 
     data["src"] = file_path
@@ -144,7 +153,7 @@ class DTLRepo:
         vendors_out = [
             {
                 "name": d.name,
-                "slug": d.name.casefold().replace(" ", "-"),
+                "slug": _slugify(d.name),
             }
             for d in sorted(set(vendor_dirs))
         ]
@@ -174,10 +183,15 @@ class DTLRepo:
             return None
 
         # Validate required fields
-        for required in ("manufacturer", "model", "slug"):
+        for required in ("manufacturer", "model"):
             if required not in data:
                 logger.warning(f"Skipping '{file_path}': missing required field '{required}'.")
                 return None
+
+        # Generate slug from model name if absent
+        if "slug" not in data:
+            data["slug"] = _slugify(data["model"])
+            logger.debug(f"Auto-generated slug '{data['slug']}' for '{file_path}'.")
 
         # Apply slug filter if provided
         if slugs and data["slug"] not in slugs:
@@ -189,7 +203,7 @@ class DTLRepo:
             name = data["manufacturer"]
             data["manufacturer"] = {
                 "name": name,
-                "slug": name.casefold().replace(" ", "-"),
+                "slug": _slugify(name),
             }
 
         # Attach source file path for image resolution later
@@ -254,7 +268,7 @@ class DTLRepo:
             name = data["manufacturer"]
             data["manufacturer"] = {
                 "name": name,
-                "slug": name.casefold().replace(" ", "-"),
+                "slug": _slugify(name),
             }
 
         data["src"] = file_path
