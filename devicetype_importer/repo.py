@@ -75,23 +75,23 @@ class DTLRepo:
 
     # ── Git Operations ───────────────────────────────────────────────────────
     def _clone_or_pull(self):
-            """Clone the repo if it doesn't exist, otherwise pull latest changes."""
-            logger.info(f"Checking for existing repo at '{self.repo_path}'...")
-            if self.repo_path.exists() and (self.repo_path / ".github").is_dir():
-                logger.info(
-                    f"Repo already exists at '{self.repo_path}' — pulling latest changes..."
-                )
-                try:
-                    repo = git.Repo(self.repo_path)
-                    origin = repo.remotes.origin
-                    origin.pull(self.repo_branch)
-                    logger.info(f"Repo updated to latest '{self.repo_branch}' branch.")
-                    return repo
-                except (git.GitCommandError, git.InvalidGitRepositoryError) as e:
-                    logger.error(f"Git operation failed: {e}. Attempting fresh clone...")
-                   # return self._fresh_clone()
-            else:
+        """Clone the repo if it doesn't exist, otherwise pull latest changes."""
+        logger.info(f"Checking for existing repo at '{self.repo_path}'...")
+        if self.repo_path.exists() and (self.repo_path / ".git").is_dir():
+            logger.info(
+                f"Repo already exists at '{self.repo_path}' — pulling latest changes..."
+            )
+            try:
+                repo = git.Repo(self.repo_path)
+                origin = repo.remotes.origin
+                origin.pull(self.repo_branch)
+                logger.info(f"Repo updated to latest '{self.repo_branch}' branch.")
+                return repo
+            except (git.GitCommandError, git.InvalidGitRepositoryError) as e:
+                logger.error(f"Git operation failed: {e}. Attempting fresh clone...")
                 return self._fresh_clone()
+        else:
+            return self._fresh_clone()
 
     def _fresh_clone(self):
         """Perform a fresh clone of the Device Type Library."""
