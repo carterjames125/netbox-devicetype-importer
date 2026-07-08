@@ -77,9 +77,7 @@ class DTLRepo:
     def _clone_or_pull(self):
             """Clone the repo if it doesn't exist, otherwise pull latest changes."""
             logger.info(f"Checking for existing repo at '{self.repo_path}'...")
-            if self.repo_path.exists() and (
-                (self.repo_path / ".git").is_dir() or (self.repo_path / ".github").is_dir()
-            ):
+            if self.repo_path.exists() and (self.repo_path / ".git").is_dir():
                 logger.info(
                     f"Repo already exists at '{self.repo_path}' — pulling latest changes..."
                 )
@@ -89,8 +87,8 @@ class DTLRepo:
                     origin.pull(self.repo_branch)
                     logger.info(f"Repo updated to latest '{self.repo_branch}' branch.")
                     return repo
-                except git.GitCommandError as e:
-                    logger.error(f"Git pull failed: {e}. Attempting fresh clone...")
+                except (git.GitCommandError, git.InvalidGitRepositoryError) as e:
+                    logger.error(f"Git operation failed: {e}. Attempting fresh clone...")
                     return self._fresh_clone()
             else:
                 return self._fresh_clone()
