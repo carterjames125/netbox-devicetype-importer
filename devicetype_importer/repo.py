@@ -62,7 +62,7 @@ def _parse_data_file_worker(payload: tuple[str, tuple[str, ...]]) -> dict | None
 class DTLRepo:
     """Manages the Device Type Library repository and parses device-type definition files."""
 
-    def __init__(self, args, repo_path: str):
+    def __init__(self, args, repo_path: str | Path):
         """Initialise the repo manager and clone or pull the library to repo_path."""
         self.args      = args
         self.repo_path = Path(repo_path).resolve()
@@ -77,7 +77,7 @@ class DTLRepo:
     def _clone_or_pull(self):
             """Clone the repo if it doesn't exist, otherwise pull latest changes."""
             logger.info(f"Checking for existing repo at '{self.repo_path}'...")
-            if self.repo_path.exists() and (self.repo_path / ".git").is_dir():
+            if self.repo_path.exists() and (self.repo_path / ".github").is_dir():
                 logger.info(
                     f"Repo already exists at '{self.repo_path}' — pulling latest changes..."
                 )
@@ -89,7 +89,7 @@ class DTLRepo:
                     return repo
                 except (git.GitCommandError, git.InvalidGitRepositoryError) as e:
                     logger.error(f"Git operation failed: {e}. Attempting fresh clone...")
-                    return self._fresh_clone()
+                   # return self._fresh_clone()
             else:
                 return self._fresh_clone()
 
