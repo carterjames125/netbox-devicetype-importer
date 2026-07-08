@@ -1,12 +1,6 @@
-modules = ["python-3.12"]
+modules = ["python-3.11"]
 [agent]
 expertMode = true
 
 [nix]
 channel = "stable-25_05"
-packages = [
-	"vim-full"
-	"python312",
-	"uv"
-
-]
