@@ -32,6 +32,7 @@ build-backend = "hatchling.build"
 
 [tool.uv]
 managed = true
+python-preference = "managed"
 
 [dependency-groups]
 dev = [

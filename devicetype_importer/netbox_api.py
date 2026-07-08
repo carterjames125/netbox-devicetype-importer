@@ -9,6 +9,13 @@ import httpx
 import pynetbox
 from loguru import logger
 
+# ── Retry constants ──────────────────────────────────────────────────────────
+
+#: HTTP status codes that indicate a transient server-side problem worth retrying.
+_RETRIABLE_STATUSES: frozenset[int] = frozenset({429, 500, 502, 503, 504})
+_MAX_RETRIES = 4
+_RETRY_BASE_DELAY = 1.0  # seconds — doubled on each attempt (1 s, 2 s, 4 s, 8 s)
+
 _image_md5_cache: dict[tuple, str] = {}
 
 
@@ -41,7 +48,8 @@ class NetBox:
         self.new_filters         = False
         self.rack_types_supported = False
 
-        self._image_sem = asyncio.Semaphore(3)  # Cap concurrent image uploads
+        self._image_sem = asyncio.Semaphore(3)   # Cap concurrent image uploads
+        self._http_sem  = asyncio.Semaphore(20)  # Cap total concurrent NetBox requests
 
         self._connect_api()
         self._verify_compatibility()
@@ -50,7 +58,7 @@ class NetBox:
         self.existing_manufacturers = self._get_manufacturers()
 
         self.device_types = DeviceTypes(
-            self.netbox, self.counter, self.ignore_ssl, self.new_filters
+            self.netbox, self.counter, self.ignore_ssl, self.new_filters, self._http_sem
         )
 
     # ── API Connection ───────────────────────────────────────────────────────
@@ -124,7 +132,7 @@ class NetBox:
 
     async def create_device_types(self, device_types_to_add: list):
         # Without a semaphore, all 500+ device types could fire at once
-        sem = asyncio.Semaphore(50)  # Process 50 at a time
+        sem = asyncio.Semaphore(10)  # Process 50 at a time
 
         async def _guarded(dt):
             async with sem:
@@ -334,11 +342,12 @@ class NetBox:
 # ── DeviceTypes ──────────────────────────────────────────────────────────────
 
 class DeviceTypes:
-    def __init__(self, netbox, counter, ignore_ssl, new_filters):
+    def __init__(self, netbox, counter, ignore_ssl, new_filters, http_sem: asyncio.Semaphore):
         self.netbox      = netbox
         self.counter     = counter
         self.ignore_ssl  = ignore_ssl
         self.new_filters = new_filters
+        self._http_sem   = http_sem  # shared semaphore — caps total concurrent NetBox requests
         # Cache all existing device types once at startup
         self.existing_device_types = {
             str(item): item for item in self.netbox.dcim.device_types.all()
@@ -355,7 +364,31 @@ class DeviceTypes:
     # ── Generic Helpers ──────────────────────────────────────────────────────
 
     def _fetch_existing(self, endpoint, filter_kwargs: dict) -> dict:
+        """Fetch all matching objects from *endpoint* (raw, no retry)."""
         return {str(item): item for item in endpoint.filter(**filter_kwargs)}
+
+    async def _fetch_existing_async(self, endpoint, filter_kwargs: dict) -> dict:
+        """Async wrapper: acquires the HTTP semaphore per attempt and retries on transient errors.
+
+        The semaphore is released before the backoff sleep so that other coroutines
+        can make progress during the wait.
+        """
+        for attempt in range(_MAX_RETRIES):
+            try:
+                async with self._http_sem:
+                    return await asyncio.to_thread(self._fetch_existing, endpoint, filter_kwargs)
+            except pynetbox.RequestError as exc:
+                status = getattr(getattr(exc, "req", None), "status_code", None)
+                if status not in _RETRIABLE_STATUSES or attempt == _MAX_RETRIES - 1:
+                    raise
+                delay = _RETRY_BASE_DELAY * (2 ** attempt)
+                logger.warning(
+                    "⚠️ NetBox HTTP {} fetching {}, retrying in {:.1f}s "
+                    "(attempt {}/{})…",
+                    status, endpoint, delay, attempt + 2, _MAX_RETRIES,
+                )
+                await asyncio.sleep(delay)  # semaphore already released; sleep is safe
+        raise RuntimeError("unreachable")
 
     def _ports_to_create(self, ports: list, type_id: int, existing: dict, id_key: str) -> list:
         to_create = [p for p in ports if p["name"] not in existing]
@@ -369,14 +402,27 @@ class DeviceTypes:
     ):
         if not to_create:
             return
-        try:
-            created = await asyncio.to_thread(endpoint.create, to_create)
-            for port in created:
-                type_str = f" ({port.type})" if hasattr(port, "type") and port.type else ""
-                logger.info(f"✅ {port_type} Created: {port.name}{type_str} [{parent_name}]")
-            self.counter.update({"updated": len(created)})
-        except pynetbox.RequestError as e:
-            logger.error(f"❌ Error creating {port_type}: {e.error}")
+        for attempt in range(_MAX_RETRIES):
+            try:
+                async with self._http_sem:
+                    created = await asyncio.to_thread(endpoint.create, to_create)
+                for port in created:
+                    type_str = f" ({port.type})" if hasattr(port, "type") and port.type else ""
+                    logger.info(f"✅ {port_type} Created: {port.name}{type_str} [{parent_name}]")
+                self.counter.update({"updated": len(created)})
+                return
+            except pynetbox.RequestError as e:
+                status = getattr(getattr(e, "req", None), "status_code", None)
+                if status not in _RETRIABLE_STATUSES or attempt == _MAX_RETRIES - 1:
+                    logger.error(f"❌ Error creating {port_type}: {e.error}")
+                    return
+                delay = _RETRY_BASE_DELAY * (2 ** attempt)
+                logger.warning(
+                    "⚠️ NetBox HTTP {} creating {}, retrying in {:.1f}s "
+                    "(attempt {}/{})…",
+                    status, port_type, delay, attempt + 2, _MAX_RETRIES,
+                )
+                await asyncio.sleep(delay)  # semaphore already released by the failed `async with`
 
     def _link_bridges(self, bridge_map: dict, existing_ifaces: dict, parent_name: str):
         """PATCH interface templates with resolved bridge IDs after initial creation."""
@@ -410,13 +456,14 @@ class DeviceTypes:
         if missing:
             to_create = [{"name": name, **base_payload} for name in missing]
             try:
-                created = await asyncio.to_thread(endpoint.create, to_create)
+                async with self._http_sem:
+                    created = await asyncio.to_thread(endpoint.create, to_create)
                 for p in created:
                     logger.info(f"✅ Auto-created missing {label}: {p.name} - {p.id}")
                     self.counter.update({"updated": 1})
             except pynetbox.RequestError as e:
                 logger.error(f"❌ Error auto-creating missing {label}s: {e.error}")
-            existing = await asyncio.to_thread(self._fetch_existing, endpoint, filt)
+            existing = await self._fetch_existing_async(endpoint, filt)
         return existing
 
     # ── Device Type Port Creation ────────────────────────────────────────────
@@ -450,7 +497,7 @@ class DeviceTypes:
 
         to_fetch = [(k, ep) for k, ep in endpoints if k in needed]
         results  = await asyncio.gather(*(
-            asyncio.to_thread(self._fetch_existing, ep, filt) for _, ep in to_fetch
+            self._fetch_existing_async(ep, filt) for _, ep in to_fetch
         ))
         existing = {key: {} for key, _ in endpoints}
         existing.update({key: result for (key, _), result in zip(to_fetch, results)})
@@ -481,8 +528,8 @@ class DeviceTypes:
                     nb.dcim.interface_templates, tc, "Interface", parent_name=parent_name
                 )
                 if bridge_map:
-                    existing["interfaces"] = await asyncio.to_thread(
-                        self._fetch_existing, nb.dcim.interface_templates, filt
+                    existing["interfaces"] = await self._fetch_existing_async(
+                        nb.dcim.interface_templates, filt
                     )
                     await asyncio.to_thread(
                         self._link_bridges, bridge_map, existing["interfaces"], parent_name
@@ -495,8 +542,8 @@ class DeviceTypes:
             await self._create_ports(
                 nb.dcim.power_port_templates, tc, "Power Port", parent_name=parent_name
             )
-            existing["power-ports"] = await asyncio.to_thread(
-                self._fetch_existing, nb.dcim.power_port_templates, filt
+            existing["power-ports"] = await self._fetch_existing_async(
+                nb.dcim.power_port_templates, filt
             )
 
         if "power-outlets" in device_type:
@@ -534,8 +581,8 @@ class DeviceTypes:
             await self._create_ports(
                 nb.dcim.rear_port_templates, tc, "Rear Port", parent_name=parent_name
             )
-            existing["rear-ports"] = await asyncio.to_thread(
-                self._fetch_existing, nb.dcim.rear_port_templates, filt
+            existing["rear-ports"] = await self._fetch_existing_async(
+                nb.dcim.rear_port_templates, filt
             )
 
         if "front-ports" in device_type:
@@ -591,7 +638,7 @@ class DeviceTypes:
 
         to_fetch = [(k, ep) for k, ep in endpoints if k in needed]
         results  = await asyncio.gather(*(
-            asyncio.to_thread(self._fetch_existing, ep, filt) for _, ep in to_fetch
+            self._fetch_existing_async(ep, filt) for _, ep in to_fetch
         ))
         existing = {key: {} for key, _ in endpoints}
         existing.update({key: result for (key, _), result in zip(to_fetch, results)})
@@ -624,8 +671,8 @@ class DeviceTypes:
                     is_module=True, parent_name=parent_name,
                 )
                 if bridge_map:
-                    existing["interfaces"] = await asyncio.to_thread(
-                        self._fetch_existing, nb.dcim.interface_templates, filt
+                    existing["interfaces"] = await self._fetch_existing_async(
+                        nb.dcim.interface_templates, filt
                     )
                     await asyncio.to_thread(
                         self._link_bridges, bridge_map, existing["interfaces"], parent_name
@@ -640,8 +687,8 @@ class DeviceTypes:
                 nb.dcim.power_port_templates, tc, "Module Power Port",
                 is_module=True, parent_name=parent_name,
             )
-            existing["power-ports"] = await asyncio.to_thread(
-                self._fetch_existing, nb.dcim.power_port_templates, filt
+            existing["power-ports"] = await self._fetch_existing_async(
+                nb.dcim.power_port_templates, filt
             )
 
         if "power-outlets" in curr_mt:
@@ -681,8 +728,8 @@ class DeviceTypes:
                 nb.dcim.rear_port_templates, tc, "Module Rear Port",
                 is_module=True, parent_name=parent_name,
             )
-            existing["rear-ports"] = await asyncio.to_thread(
-                self._fetch_existing, nb.dcim.rear_port_templates, filt
+            existing["rear-ports"] = await self._fetch_existing_async(
+                nb.dcim.rear_port_templates, filt
             )
 
         if "front-ports" in curr_mt:

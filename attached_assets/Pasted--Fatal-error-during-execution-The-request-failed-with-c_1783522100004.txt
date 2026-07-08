@@ -1,0 +1,35 @@
+ Fatal error during execution: The request failed with code 503 Service Unavailable but more specific details were not returned in json. Check the NetBox Logs or investigate this exception's error attribute.
+Traceback (most recent call last):
+  File "/home/runner/workspace/devicetype_importer/cli.py", line 161, in cli
+    asyncio.run(import_device_types(args))
+  File "/nix/store/6334pjf6w2q623rgvwi499qaiym1p6yv-python3-3.11.14/lib/python3.11/asyncio/runners.py", line 190, in run
+    return runner.run(main)
+  File "/nix/store/6334pjf6w2q623rgvwi499qaiym1p6yv-python3-3.11.14/lib/python3.11/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+  File "/nix/store/6334pjf6w2q623rgvwi499qaiym1p6yv-python3-3.11.14/lib/python3.11/asyncio/base_events.py", line 654, in run_until_complete
+    return future.result()
+  File "/home/runner/workspace/devicetype_importer/cli.py", line 41, in import_device_types
+    await netbox.create_device_types(device_types)
+  File "/home/runner/workspace/devicetype_importer/netbox_api.py", line 134, in create_device_types
+    await asyncio.gather(*tasks)
+  File "/home/runner/workspace/devicetype_importer/netbox_api.py", line 131, in _guarded
+    await self._process_device_type(dt)
+  File "/home/runner/workspace/devicetype_importer/netbox_api.py", line 175, in _process_device_type
+    await self.device_types.create_all_ports(device_type, dt.id)
+  File "/home/runner/workspace/devicetype_importer/netbox_api.py", line 452, in create_all_ports
+    results  = await asyncio.gather(*(
+  File "/nix/store/6334pjf6w2q623rgvwi499qaiym1p6yv-python3-3.11.14/lib/python3.11/asyncio/threads.py", line 25, in to_thread
+    return await loop.run_in_executor(None, func_call)
+  File "/nix/store/6334pjf6w2q623rgvwi499qaiym1p6yv-python3-3.11.14/lib/python3.11/concurrent/futures/thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/home/runner/workspace/devicetype_importer/netbox_api.py", line 358, in _fetch_existing
+    return {str(item): item for item in endpoint.filter(**filter_kwargs)}
+  File "/home/runner/workspace/devicetype_importer/netbox_api.py", line 358, in <dictcomp>
+    return {str(item): item for item in endpoint.filter(**filter_kwargs)}
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/pynetbox/core/response.py", line 134, in __next__
+    next(self.response), self.endpoint.api, self.endpoint
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/pynetbox/core/query.py", line 505, in get
+    req = self._make_call(add_params=add_params)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/pynetbox/core/query.py", line 431, in _make_call
+    raise RequestError(req)
+pynetbox.core.query.RequestError: The request failed with code 503 Service Unavailable but more specific details were not returned in json. Check the NetBox Logs or investigate this exception's error attribute.
