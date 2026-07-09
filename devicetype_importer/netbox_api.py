@@ -2,8 +2,10 @@ import asyncio
 import contextlib
 import glob
 import hashlib
+import json
 import os
 from collections import Counter
+from pathlib import Path
 
 import httpx
 import pynetbox
@@ -31,6 +33,47 @@ def _md5(path: str) -> str:
     return _image_md5_cache[key]
 
 
+class _ImageUploadCache:
+    """Persist MD5 hashes of successfully uploaded images across runs.
+
+    After a successful upload the local file path is mapped to its MD5.  On
+    the next run, if the local file has the same MD5 the upload is skipped
+    entirely — no download from NetBox is needed to verify it.
+    """
+
+    _DEFAULT_PATH = Path.home() / ".cache" / "netbox-devicetype-importer" / "image_cache.json"
+
+    def __init__(self, path: Path | None = None):
+        self._path = path or self._DEFAULT_PATH
+        self._lock = asyncio.Lock()
+        self._data: dict[str, str] = self._load()
+
+    def _load(self) -> dict[str, str]:
+        try:
+            if self._path.exists():
+                return json.loads(self._path.read_text())
+        except Exception as exc:
+            logger.warning(f"⚠️ Could not load image upload cache ({self._path}): {exc}")
+        return {}
+
+    def _save(self) -> None:
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            self._path.write_text(json.dumps(self._data, indent=2))
+        except Exception as exc:
+            logger.warning(f"⚠️ Could not save image upload cache ({self._path}): {exc}")
+
+    def already_uploaded(self, local_path: str, md5: str) -> bool:
+        """Return True if this exact file content was already uploaded successfully."""
+        return self._data.get(local_path) == md5
+
+    async def mark_uploaded(self, local_path: str, md5: str) -> None:
+        """Record a successful upload and persist the cache to disk."""
+        async with self._lock:
+            self._data[local_path] = md5
+            await asyncio.to_thread(self._save)
+
+
 class NetBox:
     def __init__(self, netbox_url, netbox_token, ignore_ssl: bool = False):
         self.counter = Counter(
@@ -48,8 +91,9 @@ class NetBox:
         self.new_filters         = False
         self.rack_types_supported = False
 
-        self._image_sem = asyncio.Semaphore(3)   # Cap concurrent image uploads
-        self._http_sem  = asyncio.Semaphore(20)  # Cap total concurrent NetBox requests
+        self._image_sem    = asyncio.Semaphore(3)   # Cap concurrent image uploads
+        self._http_sem     = asyncio.Semaphore(20)  # Cap total concurrent NetBox requests
+        self._upload_cache = _ImageUploadCache()    # Avoid re-uploading unchanged images
 
         self._connect_api()
         self._verify_compatibility()
@@ -188,15 +232,34 @@ class NetBox:
             if to_upload:
                 async with self._image_sem:
                     await self.device_types.upload_images(self.url, self.token, to_upload, dt.id)
+                for local_path in to_upload.values():
+                    await self._upload_cache.mark_uploaded(local_path, _md5(local_path))
             else:
                 logger.info(f"ℹ️ Images already up to date for [{dt.model}], skipping.")
 
     async def _filter_unchanged_images(self, images: dict, dt) -> dict:
-        """Return only images whose local content differs from what's already in NetBox."""
+        """Return only images whose local content differs from what's already in NetBox.
+
+        Check order:
+        1. Local cache hit — if the file's MD5 matches the last successfully uploaded
+           MD5, skip without contacting NetBox at all.
+        2. Remote check — download the current image from NetBox and compare MD5s.
+           This handles the first run and cases where NetBox was changed out-of-band.
+        """
         headers = {"Authorization": f"Token {self.token}"}
         loop    = asyncio.get_running_loop()
 
         async def _check(img_key: str, local_path: str, client) -> tuple | None:
+            local_md5 = await loop.run_in_executor(None, _md5, local_path)
+
+            # Fast path: trust the local cache — no network call needed.
+            if self._upload_cache.already_uploaded(local_path, local_md5):
+                logger.debug(
+                    f"✅ Image '{img_key}' unchanged (cache hit) for [{dt.model}], skipping."
+                )
+                return None
+
+            # Slow path: no cache entry yet, or file changed — verify against NetBox.
             remote_url = getattr(dt, img_key, None)
             if not remote_url:
                 return img_key, local_path
@@ -204,10 +267,11 @@ class NetBox:
                 response = await client.get(str(remote_url), headers=headers)
                 if response.status_code != 200:
                     return img_key, local_path
-                local_md5  = await loop.run_in_executor(None, _md5, local_path)
                 remote_md5 = hashlib.md5(response.content).hexdigest()
                 if local_md5 != remote_md5:
                     return img_key, local_path
+                # Remote matches local — seed the cache so future runs skip the download.
+                await self._upload_cache.mark_uploaded(local_path, local_md5)
                 logger.debug(f"✅ Image '{img_key}' unchanged for [{dt.model}], skipping.")
                 return None
             except Exception as exc:
@@ -293,6 +357,8 @@ class NetBox:
                     await self.device_types.upload_images(
                         self.url, self.token, to_upload, mt_res.id, endpoint="module-types"
                     )
+                for local_path in to_upload.values():
+                    await self._upload_cache.mark_uploaded(local_path, _md5(local_path))
             else:
                 logger.info(f"ℹ️ Images already up to date for [{mt_res.model}], skipping.")
 
