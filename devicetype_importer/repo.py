@@ -77,7 +77,12 @@ class DTLRepo:
     def _clone_or_pull(self):
             """Clone the repo if it doesn't exist, otherwise pull latest changes."""
             logger.info(f"Checking for existing repo at '{self.repo_path}'...")
-            if self.repo_path.exists() and (self.repo_path / ".git").is_dir():
+            if self.repo_path.exists() and any(
+            [
+                (self.repo_path / ".git").is_dir(),
+                (self.repo_path / ".github").is_dir()
+                                               
+            ]):
                 logger.info(
                     f"Repo already exists at '{self.repo_path}' — pulling latest changes..."
                 )
