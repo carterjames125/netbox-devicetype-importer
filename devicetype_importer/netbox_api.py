@@ -43,12 +43,15 @@ class _ImageUploadCache:
 
     _DEFAULT_PATH = Path.home() / ".cache" / "netbox-devicetype-importer" / "image_cache.json"
 
-    def __init__(self, path: Path | None = None):
+    def __init__(self, netbox_url: str, path: Path | None = None):
+        # Scope entries by NetBox URL so pointing the importer at a different
+        # instance doesn't wrongly skip uploads based on another instance's state.
+        self._url  = netbox_url
         self._path = path or self._DEFAULT_PATH
         self._lock = asyncio.Lock()
-        self._data: dict[str, str] = self._load()
+        self._data: dict[str, dict[str, str]] = self._load()
 
-    def _load(self) -> dict[str, str]:
+    def _load(self) -> dict[str, dict[str, str]]:
         try:
             if self._path.exists():
                 return json.loads(self._path.read_text())
@@ -64,13 +67,13 @@ class _ImageUploadCache:
             logger.warning(f"⚠️ Could not save image upload cache ({self._path}): {exc}")
 
     def already_uploaded(self, local_path: str, md5: str) -> bool:
-        """Return True if this exact file content was already uploaded successfully."""
-        return self._data.get(local_path) == md5
+        """Return True if this exact file content was already uploaded to this instance."""
+        return self._data.get(self._url, {}).get(local_path) == md5
 
     async def mark_uploaded(self, local_path: str, md5: str) -> None:
         """Record a successful upload and persist the cache to disk."""
         async with self._lock:
-            self._data[local_path] = md5
+            self._data.setdefault(self._url, {})[local_path] = md5
             await asyncio.to_thread(self._save)
 
 
@@ -93,7 +96,7 @@ class NetBox:
 
         self._image_sem    = asyncio.Semaphore(3)   # Cap concurrent image uploads
         self._http_sem     = asyncio.Semaphore(20)  # Cap total concurrent NetBox requests
-        self._upload_cache = _ImageUploadCache()    # Avoid re-uploading unchanged images
+        self._upload_cache = _ImageUploadCache(self.url)  # Avoid re-uploading unchanged images
 
         self._connect_api()
         self._verify_compatibility()

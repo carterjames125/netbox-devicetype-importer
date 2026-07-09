@@ -6,6 +6,7 @@ and parses them in parallel using threads or multiple processes.
 import json
 import os
 import re
+import shutil
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -75,31 +76,63 @@ class DTLRepo:
 
     # ── Git Operations ───────────────────────────────────────────────────────
     def _clone_or_pull(self):
-            """Clone the repo if it doesn't exist, otherwise pull latest changes."""
-            logger.info(f"Checking for existing repo at '{self.repo_path}'...")
-            if self.repo_path.exists() and any(
-            [
-                (self.repo_path / ".git").is_dir(),
-                (self.repo_path / ".github").is_dir()
-                                               
-            ]):
-                logger.info(
-                    f"Repo already exists at '{self.repo_path}' — pulling latest changes..."
+        """Clone the repo if it doesn't exist, otherwise pull latest changes."""
+        logger.info(f"Checking for existing repo at '{self.repo_path}'...")
+
+        # A usable checkout is identified by a real ".git" directory — nothing else.
+        # (A directory containing only ".github" is NOT a git repo.)
+        if self.repo_path.exists() and (self.repo_path / ".git").is_dir():
+            logger.info(
+                f"Repo already exists at '{self.repo_path}' — pulling latest changes..."
+            )
+            try:
+                repo = git.Repo(self.repo_path)
+                origin = repo.remotes.origin
+                origin.pull(self.repo_branch)
+                logger.info(f"Repo updated to latest '{self.repo_branch}' branch.")
+                return repo
+            except git.InvalidGitRepositoryError as e:
+                # Looks like a repo but isn't valid — safe to wipe and re-clone.
+                logger.error(
+                    f"'{self.repo_path}' is not a valid git repo: {e}. Re-cloning..."
                 )
-                try:
-                    repo = git.Repo(self.repo_path)
-                    origin = repo.remotes.origin
-                    origin.pull(self.repo_branch)
-                    logger.info(f"Repo updated to latest '{self.repo_branch}' branch.")
-                    return repo
-                except (git.GitCommandError, git.InvalidGitRepositoryError) as e:
-                    logger.error(f"Git operation failed: {e}. Attempting fresh clone...")
-                    return self._fresh_clone()
-            else:
                 return self._fresh_clone()
+            except git.GitCommandError as e:
+                # Pull failed on an otherwise valid checkout (network/auth/diverged
+                # branch). Do NOT destroy the working copy — proceed with the
+                # existing local copy, which may be slightly stale.
+                logger.warning(
+                    f"Could not update existing repo at '{self.repo_path}': {e}. "
+                    f"Proceeding with the existing local copy."
+                )
+                return repo
+        else:
+            return self._fresh_clone()
+
+    @staticmethod
+    def _assert_safe_to_delete(path: Path) -> None:
+        """Guard against rmtree of a dangerous path (root, home, cwd)."""
+        resolved  = path.resolve()
+        dangerous = {Path("/"), Path.home().resolve(), Path.cwd().resolve()}
+        if resolved in dangerous or resolved.parent == resolved:
+            logger.critical(f"Refusing to delete unsafe path '{resolved}'.")
+            raise SystemExit(1)
 
     def _fresh_clone(self):
         """Perform a fresh clone of the Device Type Library."""
+        # git clone refuses to write into a non-empty directory, so clear any
+        # leftover/corrupt contents (e.g. a partial or non-git directory) first.
+        if self.repo_path.exists():
+            self._assert_safe_to_delete(self.repo_path)
+            logger.info(f"Removing existing directory '{self.repo_path}' before cloning...")
+            try:
+                shutil.rmtree(self.repo_path)
+            except OSError as e:
+                logger.opt(exception=True).critical(
+                    f"Could not remove existing directory '{self.repo_path}': {e}"
+                )
+                raise SystemExit(1)
+
         logger.info(
             f"Cloning '{self.repo_url}' "
             f"(branch: {self.repo_branch}) "

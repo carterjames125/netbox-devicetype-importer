@@ -1,0 +1,1 @@
+- [DTL repo clone/pull safety](dtl-repo-clone.md) — detect repos by `.git` only; wipe on invalid-repo but never on transient pull failure.
