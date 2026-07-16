@@ -1,0 +1,16 @@
+.venv/
+repo/
+logs/
+*.log
+.git/
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+*.pyc
+.env
+.env.*
+!.env.example
+!devicetype_importer/.env.example
+tests/
+attached_assets/
+.replit
