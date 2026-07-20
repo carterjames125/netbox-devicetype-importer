@@ -33,6 +33,29 @@ def _md5(path: str) -> str:
     return _image_md5_cache[key]
 
 
+# Rack-type fields NetBox stores as integers. DTL YAMLs sometimes provide decimals
+# (e.g. outer_width: 20.3), which the API rejects with "A valid integer is required."
+# NOTE: rack "weight"/"outer_unit" are intentionally excluded — weight is a decimal
+# field in NetBox and outer_unit is a string.
+_RACK_INT_FIELDS: frozenset[str] = frozenset({
+    "u_height",
+    "starting_unit",
+    "outer_width",
+    "outer_height",
+    "outer_depth",
+    "mounting_depth",
+    "max_weight",
+})
+
+
+def _coerce_rack_integers(payload: dict) -> None:
+    """Round decimal dimension values to ints in-place for integer-only NetBox fields."""
+    for field in _RACK_INT_FIELDS:
+        value = payload.get(field)
+        if isinstance(value, float):
+            payload[field] = round(value)
+
+
 class _ImageUploadCache:
     """Persist MD5 hashes of successfully uploaded images across runs.
 
@@ -396,6 +419,7 @@ class NetBox:
         except KeyError:
             try:
                 rt_payload = {k: v for k, v in curr_rt.items() if k != "src"}
+                _coerce_rack_integers(rt_payload)
                 rt_res = await asyncio.to_thread(
                     self.netbox.dcim.rack_types.create, rt_payload
                 )
